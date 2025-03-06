@@ -38,7 +38,7 @@ export class TelegramInterface {
       );
       this.bot.sendMessage(
         chatId,
-        "Hello! I am your NIL blockchain assistant. How can I help you today?\nUse /exit to return to terminal or /kill to shut down the application.",
+        "Hello! I am your NIL blockchain assistant. How can I help you today?\nUse /menu to see available commands, /exit to return to terminal or /kill to shut down the application.",
       );
     });
 
@@ -58,20 +58,32 @@ export class TelegramInterface {
       const chatId = msg.chat.id;
       if (this.isStarted) {
         await this.bot.sendMessage(chatId, "Shutting down the application...");
-        console.log("Kill command received. Shutting down...");
+        console.log("Telegram session ended. Shutting down application...");
         this.bot.stopPolling();
         this.options.onKill();
       }
     });
 
     // Handle /demo command
-    this.bot.onText(/\/demo/, (msg) => this.handleDemoCommand(msg));
+    this.bot.onText(/\/demo/, (msg) => {
+      this.handleDemoCommand(msg);
+    });
+
+    // Handle /menu command
+    this.bot.onText(/\/menu/, (msg) => {
+      this.handleMenuCommand(msg);
+    });
 
     // Handle all other messages
-    this.bot.on("message", async (msg) => {
-      if (msg.text && !msg.text.startsWith("/") && this.isStarted) {
-        this.handleMessage(msg);
+    this.bot.on("message", (msg) => {
+      if (msg.text?.startsWith("/")) {
+        // Skip if it's a command we already handle
+        const knownCommands = ["/start", "/exit", "/kill", "/demo", "/menu"];
+        if (knownCommands.some(cmd => msg.text?.startsWith(cmd))) {
+          return;
+        }
       }
+      this.handleMessage(msg);
     });
   }
 
@@ -130,5 +142,94 @@ export class TelegramInterface {
     }
 
     await this.bot.sendMessage(chatId, "\nDemo completed! You can now try these actions yourself.");
+  }
+
+  private async handleMenuCommand(msg: TelegramBot.Message) {
+    const chatId = msg.chat.id;
+    
+    if (!this.isStarted) {
+      this.bot.sendMessage(chatId, "Please use /start to begin the session first.");
+      return;
+    }
+    
+    try {
+      // Generate a list of available actions
+      const actions = this.agent.getActions();
+      
+      // Group actions by category
+      const categories: Record<string, any[]> = {
+        "Contract Deployment": [],
+        "Account Management": [],
+        "Contract Interaction": [],
+        "Balance Operations": [],
+        "Supply Chain": [],
+        "Other": []
+      };
+      
+      // Map actions to categories with examples
+      actions.forEach((action: any) => {
+        const name = action.name;
+        const provider = this.agent.actionProviders.find((p: any) => 
+          p.getActions(this.agent.walletProvider).some((a: any) => a.name === name)
+        );
+        
+        // Try to get example if the provider supports it
+        let example = "";
+        if (provider && typeof provider.getCommandExample === 'function') {
+          example = provider.getCommandExample(name);
+        }
+        
+        const actionInfo = {
+          name,
+          description: action.description,
+          example
+        };
+        
+        // Categorization logic
+        if (name.startsWith("deploy-") && !name.includes("smart-account")) {
+          categories["Contract Deployment"].push(actionInfo);
+        } else if (name.includes("smart-account") || name.includes("token")) {
+          categories["Account Management"].push(actionInfo);
+        } else if (name.includes("balance")) {
+          categories["Balance Operations"].push(actionInfo);
+        } else if (name.includes("supply-chain") || name.includes("product")) {
+          categories["Supply Chain"].push(actionInfo);
+        } else if (name.includes("call-") || name.includes("execute-")) {
+          categories["Contract Interaction"].push(actionInfo);
+        } else {
+          categories["Other"].push(actionInfo);
+        }
+      });
+      
+      // Build menu text with examples for Telegram
+      let menu = "*Available Commands*\n\n";
+      
+      Object.entries(categories).forEach(([category, actionInfos]) => {
+        if (actionInfos.length > 0) {
+          menu += `*${category}*\n`;
+          actionInfos.forEach(info => {
+            menu += `- *${info.name}*: ${info.description}\n`;
+            if (info.example) {
+              menu += `  Example: \`${info.example}\`\n`;
+            }
+          });
+          menu += "\n";
+        }
+      });
+      
+      // Add instructions for getting full examples
+      menu += "Use /show-examples to see detailed examples for all commands.";
+      
+      // Send the menu
+      await this.bot.sendMessage(chatId, menu, {
+        parse_mode: "Markdown"
+      });
+    } catch (error) {
+      console.error("Error generating menu:", error);
+      await this.bot.sendMessage(
+        chatId,
+        "Sorry, there was an error generating the menu. Please try again."
+      );
+    }
   }
 }

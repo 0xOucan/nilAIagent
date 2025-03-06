@@ -17,4 +17,18 @@ export class TopUpError extends NilAccountError {
     super(`Failed to top up ${token}: ${message}`);
     this.name = 'TopUpError';
   }
-} 
+}
+
+export class TokenMintingError extends NilAccountError {
+  constructor(message: string) {
+    super(`Token minting failed: ${message}`);
+    this.name = 'TokenMintingError';
+  }
+}
+
+export class InvalidAddressError extends NilAccountError {
+  constructor(address: string) {
+    super(`Invalid address format: ${address}`);
+    this.name = 'InvalidAddressError';
+  }
+}

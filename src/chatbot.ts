@@ -24,6 +24,7 @@ import { nilAccountActionProvider } from "./action-providers/nil-account/nilAcco
 import { nilBalanceActionProvider } from "./action-providers/nil-account/nilBalanceActionProvider";
 import { TelegramInterface } from "./telegram-interface";
 import { nilSmartAccountActionProvider } from "./action-providers/nil-account/nilSmartAccountActionProvider";
+import { nilSupplyChainActionProvider } from "./action-providers/nil-supply-chain";
 
 // Add these types
 type Agent = {
@@ -31,6 +32,7 @@ type Agent = {
   walletProvider: WalletProvider;
   actionProviders: ActionProvider<WalletProvider>[];
   getActions: () => any[];
+  findProviderByActionName?: (name: string) => ActionProvider<WalletProvider> | undefined;
 };
 
 type AgentConfig = {
@@ -130,6 +132,7 @@ async function initializeAgent(): Promise<{ agent: Agent; config: AgentConfig }>
       nilContractActionProvider(),
       nilBalanceActionProvider(),
       nilSmartAccountActionProvider(),
+      nilSupplyChainActionProvider(),
     ];
 
     // Now provide the mock wallet provider
@@ -164,6 +167,13 @@ async function initializeAgent(): Promise<{ agent: Agent; config: AgentConfig }>
         - View contract explorer links
         
         Always provide clickable explorer links when returning contract addresses or transaction hashes.
+        
+        IMPORTANT COMMAND HANDLING:
+        - When a user says "deploy smart account" or similar, immediately execute the create-smart-account action with default parameters.
+        - If user specifies a shard (e.g., "deploy smart account shard 2"), use that shard but keep all other parameters default.
+        - Always use random salt values and auto-generate private keys when not explicitly provided.
+        - Avoid asking for further input when defaults can be used - take initiative to complete the action.
+        - Focus on making interactions simple and direct, with minimal back-and-forth.
       `,
     });
 
@@ -178,7 +188,12 @@ async function initializeAgent(): Promise<{ agent: Agent; config: AgentConfig }>
         },
         walletProvider: mockWalletProvider, 
         actionProviders: providers,
-        getActions: () => tools
+        getActions: () => tools,
+        findProviderByActionName: (name: string) => {
+          return providers.find(p => 
+            p.getActions(mockWalletProvider).some(a => a.name === name)
+          );
+        }
       },
       config: agentConfig 
     };
@@ -190,40 +205,67 @@ async function initializeAgent(): Promise<{ agent: Agent; config: AgentConfig }>
 
 // Validate required environment variables
 function validateEnvironment() {
-  const requiredVars = ["OPENAI_API_KEY", "NIL_RPC_ENDPOINT", "NIL_FAUCET_ENDPOINT"];
-  const missingVars = requiredVars.filter(varName => !process.env[varName]);
+  const requiredVars = [
+    'OPENAI_API_KEY',
+    'NIL_RPC_ENDPOINT',
+    'NIL_FAUCET_ENDPOINT'
+  ];
+  
+  const missingVars = requiredVars.filter(variable => !process.env[variable]);
   
   if (missingVars.length > 0) {
-    throw new Error(`Missing required environment variables: ${missingVars.join(", ")}`);
+    console.error('\nEnvironment Error: The following required environment variables are missing:');
+    missingVars.forEach(variable => {
+      console.error(`- ${variable}`);
+    });
+    console.error('\nPlease create a .env file with these variables. See .env.example for reference.');
+    process.exit(1);
   }
   
-  // We don't need to check for CDP credentials since we're using NIL APIs directly
-  console.log("Environment validated successfully - Note: No Coinbase CDP credentials required");
+  // Optional but recommended: validate URL formats for endpoints
+  try {
+    new URL(process.env.NIL_RPC_ENDPOINT!);
+    new URL(process.env.NIL_FAUCET_ENDPOINT!);
+  } catch (error) {
+    console.error('\nEnvironment Error: Invalid URL format for NIL_RPC_ENDPOINT or NIL_FAUCET_ENDPOINT');
+    console.error('Please make sure these are valid URLs in your .env file.');
+    process.exit(1);
+  }
+  
+  console.log('Environment validation successful.');
 }
 
 // Interactive chat mode
 function startChatMode(agent: Agent, config: AgentConfig, rl: readline.Interface) {
   console.log("Starting chat mode... Type 'exit' to end.");
-  
+
+  const displayMenu = () => {
+    const menu = generateCommandMenu(agent);
+    console.log(menu);
+  };
+
   const promptUser = () => {
     rl.question("Prompt: ", async (input) => {
       if (input.toLowerCase() === "exit") {
-        rl.close();
+        console.log("Exiting chat mode...");
         process.exit(0);
-        return;
+      } else if (input.toLowerCase() === "/menu" || input.toLowerCase() === "menu") {
+        displayMenu();
+        promptUser();
+      } else {
+        try {
+          const response = await agent.invoke(input, config);
+          console.log(response);
+        } catch (error) {
+          console.error("Error processing message:", error);
+        }
+        promptUser();
       }
-      
-      try {
-        const response = await agent.invoke(input, config);
-        console.log(response);
-      } catch (error) {
-        console.error("Error processing message:", error);
-      }
-      
-      promptUser();
     });
   };
   
+  // Show menu on startup
+  displayMenu();
   promptUser();
 }
 
@@ -331,4 +373,74 @@ function startDemoMode(agent: Agent, config: AgentConfig, rl: readline.Interface
   };
   
   runNextStep();
+}
+
+// Improved function to generate command menu
+function generateCommandMenu(agent: Agent): string {
+  // Get all available actions
+  const actions = agent.getActions();
+  
+  // Group actions by category
+  const categories: Record<string, any[]> = {
+    "Contract Deployment": [],
+    "Account Management": [],
+    "Contract Interaction": [],
+    "Balance Operations": [],
+    "Supply Chain": [],
+    "Other": []
+  };
+  
+  // Map actions to categories with examples
+  actions.forEach(action => {
+    const name = action.name;
+    const provider = agent.actionProviders.find(p => 
+      p.getActions(agent.walletProvider).some(a => a.name === name)
+    );
+    
+    // Try to get example if the provider supports it
+    let example = "";
+    if (provider && typeof (provider as any).getCommandExample === 'function') {
+      example = (provider as any).getCommandExample(name);
+    }
+    
+    const actionInfo = {
+      name,
+      description: action.description,
+      example
+    };
+    
+    if (name.startsWith("deploy-") && !name.includes("smart-account") && !name.includes("supply-chain")) {
+      categories["Contract Deployment"].push(actionInfo);
+    } else if (name.includes("smart-account") || name.includes("token")) {
+      categories["Account Management"].push(actionInfo);
+    } else if (name.includes("balance")) {
+      categories["Balance Operations"].push(actionInfo);
+    } else if (name.includes("supply-chain") || name.includes("product") || name.includes("manufacturer") || name.includes("retailer")) {
+      categories["Supply Chain"].push(actionInfo);
+    } else if (name.includes("counter") || name.includes("increment") || name.includes("get")) {
+      categories["Contract Interaction"].push(actionInfo);
+    } else {
+      categories["Other"].push(actionInfo);
+    }
+  });
+  
+  // Build enhanced menu text with examples
+  let menu = "# Available Commands\n\n";
+  
+  Object.entries(categories).forEach(([category, actionInfos]) => {
+    if (actionInfos.length > 0) {
+      menu += `## ${category}\n`;
+      actionInfos.forEach(info => {
+        menu += `- **${info.name}**: ${info.description}\n`;
+        if (info.example) {
+          menu += `  Example: \`${info.example}\`\n`;
+        }
+      });
+      menu += "\n";
+    }
+  });
+  
+  menu += "Use `/menu` to see this list again anytime.\n";
+  menu += "Use `/show-examples` to see detailed examples for all commands.\n";
+  return menu;
 }
